@@ -51,13 +51,16 @@
   <script type="module">
     import { FilesetResolver, FaceLandmarker, GestureRecognizer }
       from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
-    import "https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js";
+    import "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
 
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
     const localLayer = document.getElementById("localLayer");
     const remoteLayer = document.getElementById("remoteLayer");
     const statusEl = document.getElementById("status");
+
+    // help autoplay policies; your local stream has audio:false anyway
+    remoteVideo.muted = true;
 
     const MAX_PARTICLES = 140;
     const MIN_GAP_MS = 140;
@@ -85,7 +88,7 @@
       }
     }
 
-    // MediaPipe setup (use imported classes, not window.*)
+    // MediaPipe setup
     const fileset = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
     );
@@ -131,12 +134,30 @@
     localVideo.srcObject = localStream;
     await localVideo.play();
 
-    // PeerJS with fixed peer "caller"
+    // PeerJS
     const FIXED_ID = "caller";
-    const peerOpts = { host:"peerjs.com", port:443, secure:true, path:"/peerjs" };
+    const peerOpts = {
+      host: "0.peerjs.com",
+      port: 443,
+      secure: true,
+      path: "/",
+      debug: 2,
+      config: {
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          // replace these with your own TURN for production
+          { urls: "turn:openrelay.metered.ca:80" },
+          { urls: "turn:openrelay.metered.ca:443" },
+          { urls: "turn:openrelay.metered.ca:3478" }
+        ],
+        sdpSemantics: "unified-plan"
+      }
+    };
 
     let peer;
     let dataConn = null;
+    let mediaCall = null;
+    let remoteStreamArrived = false;
 
     function setStatus(s) { statusEl.textContent = s; }
 
@@ -154,7 +175,9 @@
     }
 
     function setupMediaCallHandlers(call) {
+      mediaCall = call;
       call.on("stream", remoteStream => {
+        remoteStreamArrived = true;
         remoteVideo.srcObject = remoteStream;
         remoteVideo.play().catch(()=>{});
         setStatus(`Connected to ${call.peer}`);
@@ -167,12 +190,17 @@
       peer = new window.Peer(FIXED_ID, peerOpts);
       peer.on("open", id => setStatus(`Hosting as "${id}"`));
       peer.on("connection", setupData);
-      peer.on("call", call => { call.answer(localStream); setupMediaCallHandlers(call); });
+      peer.on("call", call => {
+        call.answer(localStream);
+        setupMediaCallHandlers(call);
+      });
       peer.on("error", err => {
         if (err?.type === "unavailable-id" || /taken/i.test(err?.message||"")) {
-          bootAsClient(); // ID taken -> be client
+          bootAsClient();
         } else setStatus(`Peer error: ${err?.message || err}`);
       });
+      peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
+      peer.on("close", ()=>setStatus("Peer destroyed"));
     }
 
     function bootAsClient() {
@@ -181,10 +209,23 @@
         setStatus(`Client ${id} → "${FIXED_ID}"`);
         const conn = peer.connect(FIXED_ID);
         conn.on("open", () => setupData(conn));
+
         const call = peer.call(FIXED_ID, localStream);
         setupMediaCallHandlers(call);
+
+        // retry once if no remote stream
+        setTimeout(() => {
+          if (!remoteStreamArrived && call.open) {
+            setStatus("No remote stream. Retrying call…");
+            call.close();
+            const c2 = peer.call(FIXED_ID, localStream);
+            setupMediaCallHandlers(c2);
+          }
+        }, 8000);
       });
       peer.on("error", err => setStatus(`Peer error: ${err?.message || err}`));
+      peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
+      peer.on("close", ()=>setStatus("Peer destroyed"));
     }
 
     bootAsHost();
