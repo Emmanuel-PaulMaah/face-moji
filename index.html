@@ -7,12 +7,26 @@
   <style>
     :root { --rise: 80vh; }
     body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto; background:#0f0f10; color:#eee; }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; height:100vh; box-sizing:border-box; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:90px 12px 12px; height:100vh; box-sizing:border-box; }
     .pane { position:relative; background:#000; border-radius:12px; overflow:hidden; }
     video { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
     .label { position:absolute; top:8px; left:10px; font-size:12px; opacity:.7; }
     .emojis { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
     .status { position:fixed; left:12px; bottom:12px; opacity:.8; font-size:13px; }
+    .controls {
+      position:fixed; top:10px; left:12px; right:12px;
+      display:flex; gap:8px; align-items:center; z-index:2;
+      background:#121214; border:1px solid #202026; border-radius:10px; padding:10px;
+    }
+    .controls input {
+      flex:1; background:#0a0a0b; color:#ddd; border:1px solid #2a2a2f;
+      padding:10px 12px; border-radius:8px; outline:none; font-size:14px;
+    }
+    .controls button {
+      background:#2b6ef6; color:white; border:0; padding:10px 14px; border-radius:8px; font-weight:600;
+      cursor:pointer;
+    }
+    .controls button.secondary { background:#2a2a2f; }
     .bubble {
       position:absolute; left:50%; bottom:8%;
       font-size:min(14vw,72px);
@@ -33,7 +47,13 @@
   <link rel="icon" href="data:,">
 </head>
 <body>
-  <h6> holocall - face-moji </h6>
+  <div class="controls">
+    <strong>Room word</strong>
+    <input id="roomInput" placeholder="e.g. comet-river" autocomplete="off" />
+    <button id="suggestBtn" class="secondary" title="Suggest word">Suggest</button>
+    <button id="startBtn">Start</button>
+  </div>
+
   <div class="grid">
     <div class="pane">
       <div class="label">you</div>
@@ -46,7 +66,7 @@
       <div id="remoteLayer" class="emojis" aria-hidden="true"></div>
     </div>
   </div>
-  <div id="status" class="status">Starting…</div>
+  <div id="status" class="status">Enter the same word on both devices. Press Start.</div>
 
   <script type="module">
     import { FilesetResolver, FaceLandmarker, GestureRecognizer }
@@ -58,14 +78,17 @@
     const localLayer = document.getElementById("localLayer");
     const remoteLayer = document.getElementById("remoteLayer");
     const statusEl = document.getElementById("status");
+    const roomInput = document.getElementById("roomInput");
+    const startBtn = document.getElementById("startBtn");
+    const suggestBtn = document.getElementById("suggestBtn");
 
-    // help autoplay policies; your local stream has audio:false anyway
     remoteVideo.muted = true;
 
     const MAX_PARTICLES = 140;
     const MIN_GAP_MS = 140;
     const lastEmit = new Map();
 
+    function setStatus(s) { statusEl.textContent = s; }
     function emit(layer, emoji, key = emoji) {
       const now = performance.now();
       const last = lastEmit.get(key) || 0;
@@ -75,11 +98,9 @@
       const b = document.createElement("div");
       b.className = "bubble";
       b.textContent = emoji;
-
       b.style.setProperty("--x", (Math.random()*120-60) + "px");
       b.style.setProperty("--drift", (Math.random()*60-30) + "px");
       b.style.setProperty("--dur", (1700 + Math.random()*1200) + "ms");
-
       layer.appendChild(b);
       b.addEventListener("animationend", () => b.remove());
       if (layer.childElementCount > MAX_PARTICLES) {
@@ -88,11 +109,19 @@
       }
     }
 
+    // Suggest simple readable room words
+    const ADJ = ["solar","lunar","comet","crisp","neon","azure","gamma","swift","quiet","vivid","lively","brisk","mellow","frost","ember","nova"];
+    const NOUN = ["river","meadow","orbit","oasis","forest","harbor","valley","summit","island","canyon","matrix","circuit","galaxy","vector","garden","studio"];
+    function suggestWord() {
+      const a = ADJ[Math.floor(Math.random()*ADJ.length)];
+      const n = NOUN[Math.floor(Math.random()*NOUN.length)];
+      return `${a}-${n}`;
+    }
+
     // MediaPipe setup
     const fileset = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
     );
-
     const faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath:
@@ -101,7 +130,6 @@
       runningMode: "VIDEO",
       numFaces: 1
     });
-
     const gestureRecognizer = await GestureRecognizer.createFromOptions(fileset, {
       baseOptions: {
         modelAssetPath:
@@ -123,7 +151,6 @@
       const cornersY = (L.y + R.y) / 2;
       const roundness = height / width;
       const cornerDelta = (cornersY - centerY) / width;
-
       if (roundness >= 0.58 && Math.abs(cornerDelta) < 0.025) return "wow";
       if (roundness >= 0.36 && roundness <= 0.58 && cornerDelta <= -0.06) return "laugh";
       return "neutral";
@@ -134,8 +161,7 @@
     localVideo.srcObject = localStream;
     await localVideo.play();
 
-    // PeerJS
-    const FIXED_ID = "caller";
+    // PeerJS options
     const peerOpts = {
       host: "0.peerjs.com",
       port: 443,
@@ -145,7 +171,7 @@
       config: {
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
-          // replace these with your own TURN for production
+          // replace with your own TURN for production
           { urls: "turn:openrelay.metered.ca:80" },
           { urls: "turn:openrelay.metered.ca:443" },
           { urls: "turn:openrelay.metered.ca:3478" }
@@ -154,12 +180,11 @@
       }
     };
 
-    let peer;
+    let peer = null;
     let dataConn = null;
     let mediaCall = null;
     let remoteStreamArrived = false;
-
-    function setStatus(s) { statusEl.textContent = s; }
+    let startedForRoom = null;
 
     function setupData(conn) {
       dataConn = conn;
@@ -186,49 +211,82 @@
       call.on("error", e => setStatus(`Call error: ${e?.message || e}`));
     }
 
-    function bootAsHost() {
-      peer = new window.Peer(FIXED_ID, peerOpts);
-      peer.on("open", id => setStatus(`Hosting as "${id}"`));
+    function destroyPeer() {
+      try { mediaCall?.close(); } catch {}
+      try { dataConn?.close(); } catch {}
+      try { peer?.disconnect(); } catch {}
+      try { peer?.destroy(); } catch {}
+      peer = null; dataConn = null; mediaCall = null; remoteStreamArrived = false;
+    }
+
+    function startForRoom(roomWord) {
+      if (!roomWord || roomWord.length < 2) { setStatus("Enter a room word."); return; }
+      if (peer) destroyPeer();
+      startedForRoom = roomWord;
+
+      // Try to host on this ID; if taken, become client that connects to it.
+      peer = new window.Peer(roomWord, peerOpts);
+      setStatus(`Starting with room "${roomWord}"…`);
+
+      peer.on("open", id => setStatus(`Hosting "${id}" — waiting for peer…`));
       peer.on("connection", setupData);
-      peer.on("call", call => {
-        call.answer(localStream);
-        setupMediaCallHandlers(call);
-      });
+      peer.on("call", call => { call.answer(localStream); setupMediaCallHandlers(call); });
+
+      // If ID is taken, switch to client mode automatically
       peer.on("error", err => {
-        if (err?.type === "unavailable-id" || /taken/i.test(err?.message||"")) {
-          bootAsClient();
-        } else setStatus(`Peer error: ${err?.message || err}`);
+        const msg = err?.message || "";
+        if (err?.type === "unavailable-id" || /taken/i.test(msg)) {
+          // Become client
+          const client = new window.Peer(undefined, peerOpts);
+          peer = client; // swap reference
+          client.on("open", id => {
+            setStatus(`Joining "${roomWord}" as ${id}`);
+            const conn = client.connect(roomWord);
+            conn.on("open", () => setupData(conn));
+            const call = client.call(roomWord, localStream);
+            setupMediaCallHandlers(call);
+
+            // Retry once if no remote stream
+            setTimeout(() => {
+              if (!remoteStreamArrived && call.open) {
+                setStatus("No remote stream. Retrying call…");
+                call.close();
+                const c2 = client.call(roomWord, localStream);
+                setupMediaCallHandlers(c2);
+              }
+            }, 8000);
+          });
+          client.on("error", e2 => setStatus(`Peer error: ${e2?.message || e2}`));
+        } else {
+          setStatus(`Peer error: ${msg}`);
+        }
       });
+
       peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
       peer.on("close", ()=>setStatus("Peer destroyed"));
     }
 
-    function bootAsClient() {
-      peer = new window.Peer(undefined, peerOpts);
-      peer.on("open", id => {
-        setStatus(`Client ${id} → "${FIXED_ID}"`);
-        const conn = peer.connect(FIXED_ID);
-        conn.on("open", () => setupData(conn));
-
-        const call = peer.call(FIXED_ID, localStream);
-        setupMediaCallHandlers(call);
-
-        // retry once if no remote stream
-        setTimeout(() => {
-          if (!remoteStreamArrived && call.open) {
-            setStatus("No remote stream. Retrying call…");
-            call.close();
-            const c2 = peer.call(FIXED_ID, localStream);
-            setupMediaCallHandlers(c2);
-          }
-        }, 8000);
-      });
-      peer.on("error", err => setStatus(`Peer error: ${err?.message || err}`));
-      peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
-      peer.on("close", ()=>setStatus("Peer destroyed"));
+    // UI wiring
+    function primeInput() {
+      const saved = localStorage.getItem("roomWord");
+      const seed = saved || suggestWord();
+      roomInput.value = seed;
     }
+    primeInput();
 
-    bootAsHost();
+    suggestBtn.addEventListener("click", () => {
+      roomInput.value = suggestWord();
+      roomInput.focus();
+      roomInput.select();
+    });
+    startBtn.addEventListener("click", () => {
+      const word = roomInput.value.trim().toLowerCase().replace(/\s+/g, "-");
+      localStorage.setItem("roomWord", word);
+      startForRoom(word);
+    });
+    roomInput.addEventListener("keydown", e => {
+      if (e.key === "Enter") startBtn.click();
+    });
 
     // Detection loop
     function loop() {
