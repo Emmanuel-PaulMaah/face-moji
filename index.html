@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Emoji WebRTC – laugh, wow, 👍</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --rise: 80vh; }
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto; background:#0f0f10; color:#eee; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; height:100vh; box-sizing:border-box; }
+    .pane { position:relative; background:#000; border-radius:12px; overflow:hidden; }
+    video { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+    .label { position:absolute; top:8px; left:10px; font-size:12px; opacity:.7; }
+    .emojis { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+    .status { position:fixed; left:12px; bottom:12px; opacity:.8; font-size:13px; }
+    /* rising particles */
+    .bubble {
+      position:absolute;
+      left:50%;
+      bottom:8%;
+      font-size:min(14vw,72px);
+      filter: drop-shadow(0 6px 18px rgba(0,0,0,.6));
+      will-change: transform, opacity;
+      animation: rise var(--dur, 1800ms) ease-out forwards;
+      transform: translateX(var(--x,0)) translateY(0);
+      opacity: 0;
+    }
+    @keyframes rise {
+      0%   { transform: translateX(var(--x,0)) translateY(0) scale(1); opacity:0; }
+      12%  { opacity:1; }
+      70%  { opacity:.6; }
+      100% { transform: translateX(calc(var(--x,0) + var(--drift, 0px))) translateY(calc(-1 * var(--rise))) scale(1.1); opacity:0; }
+    }
+    @media (max-width: 900px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div class="pane">
+      <div class="label">You</div>
+      <video id="localVideo" autoplay playsinline muted></video>
+      <div id="localLayer" class="emojis" aria-hidden="true"></div>
+    </div>
+    <div class="pane">
+      <div class="label">Peer</div>
+      <video id="remoteVideo" autoplay playsinline></video>
+      <div id="remoteLayer" class="emojis" aria-hidden="true"></div>
+    </div>
+  </div>
+  <div id="status" class="status">Starting…</div>
+
+  <script type="module">
+    // --- libs
+    import { FilesetResolver, FaceLandmarker, GestureRecognizer }
+      from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
+    // PeerJS
+    import "https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js";
+
+    // --- DOM
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const localLayer = document.getElementById("localLayer");
+    const remoteLayer = document.getElementById("remoteLayer");
+    const statusEl = document.getElementById("status");
+
+    // --- particle system
+    const MAX_PARTICLES = 140;
+    const MIN_GAP_MS = 140; // per-emoji cadence
+    const lastEmit = new Map(); // key -> ts
+
+    function emit(layer, emoji, key = emoji) {
+      const now = performance.now();
+      const last = lastEmit.get(key) || 0;
+      if (now - last < MIN_GAP_MS) return;
+      lastEmit.set(key, now);
+
+      const b = document.createElement("div");
+      b.className = "bubble";
+      b.textContent = emoji;
+
+      const jitter = (Math.random() * 120 - 60) + "px";
+      const drift  = (Math.random() * 60  - 30) + "px";
+      const dur    = (1700 + Math.random() * 1200) + "ms";
+      b.style.setProperty("--x", jitter);
+      b.style.setProperty("--drift", drift);
+      b.style.setProperty("--dur", dur);
+
+      layer.appendChild(b);
+      b.addEventListener("animationend", () => b.remove());
+
+      if (layer.childElementCount > MAX_PARTICLES) {
+        const excess = layer.childElementCount - MAX_PARTICLES;
+        for (let i = 0; i < excess; i++) layer.firstElementChild?.remove();
+      }
+    }
+
+    // --- detection (laugh, wow, thumbs up)
+    const fileset = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+    );
+    const faceLandmarker = await window.FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+      },
+      runningMode: "VIDEO",
+      numFaces: 1
+    });
+    const gestureRecognizer = await window.GestureRecognizer.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
+      },
+      runningMode: "VIDEO",
+      numHands: 1
+    });
+
+    function mouthState(landmarks) {
+      const lmk = landmarks?.[0];
+      if (!lmk) return "neutral";
+      const L = lmk[61], R = lmk[291], U = lmk[13], D = lmk[14];
+      if (!L || !R || !U || !D) return "neutral";
+      const width = Math.hypot(L.x - R.x, L.y - R.y);
+      const height = Math.hypot(U.x - D.x, U.y - D.y);
+      if (width < 1e-6) return "neutral";
+      const centerY = (U.y + D.y) / 2;
+      const cornersY = (L.y + R.y) / 2;
+      const roundness = height / width;                 // tall -> higher
+      const cornerDelta = (cornersY - centerY) / width; // negative -> corners up
+
+      // WOW: very open and circular, corners neutral
+      if (roundness >= 0.58 && Math.abs(cornerDelta) < 0.025) return "wow";
+      // LAUGH: open but less circular, corners clearly up
+      if (roundness >= 0.36 && roundness <= 0.58 && cornerDelta <= -0.06) return "laugh";
+      return "neutral";
+    }
+
+    // --- camera
+    const localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+    localVideo.srcObject = localStream;
+    await localVideo.play();
+
+    // --- PeerJS wiring with fixed ID logic
+    const FIXED_ID = "caller";
+    const peerOpts = { host:"peerjs.com", port:443, secure:true, path:"/peerjs" };
+
+    let peer;
+    let role = "host"; // try host first
+    let dataConn = null;
+
+    function setStatus(s) { statusEl.textContent = s; }
+
+    function setupData(conn) {
+      dataConn = conn;
+      conn.on("data", msg => {
+        if (!msg || typeof msg !== "object") return;
+        if (msg.type === "emoji" && msg.value) {
+          emit(remoteLayer, msg.value, "remote-" + msg.value);
+        }
+      });
+      conn.on("close", () => setStatus("Peer disconnected"));
+      setStatus("Data channel connected");
+    }
+
+    function sendEmoji(emoji) {
+      if (dataConn && dataConn.open) {
+        dataConn.send({ type:"emoji", value: emoji });
+      }
+    }
+
+    function setupMediaCallHandlers(call) {
+      call.on("stream", remoteStream => {
+        remoteVideo.srcObject = remoteStream;
+        remoteVideo.play().catch(()=>{});
+        setStatus(`Connected to ${call.peer}`);
+      });
+      call.on("close", () => setStatus("Call closed"));
+      call.on("error", () => setStatus("Call error"));
+    }
+
+    // Try to own the fixed ID. If taken, become client.
+    function bootAsHost() {
+      peer = new window.Peer(FIXED_ID, peerOpts);
+      peer.on("open", id => setStatus(`Hosting as "${id}"`));
+      peer.on("connection", setupData);
+      peer.on("call", call => {
+        call.answer(localStream);
+        setupMediaCallHandlers(call);
+      });
+      peer.on("error", err => {
+        if (err?.type === "unavailable-id" || /taken/i.test(err?.message || "")) {
+          // Switch to client
+          role = "client";
+          bootAsClient();
+        } else {
+          setStatus(`Peer error: ${err?.message || err}`);
+        }
+      });
+    }
+
+    function bootAsClient() {
+      peer = new window.Peer(undefined, peerOpts);
+      peer.on("open", id => {
+        setStatus(`Client id ${id} → connecting to "${FIXED_ID}"`);
+        // data
+        const conn = peer.connect(FIXED_ID);
+        conn.on("open", () => setupData(conn));
+        // media
+        const call = peer.call(FIXED_ID, localStream);
+        setupMediaCallHandlers(call);
+      });
+      peer.on("error", err => setStatus(`Peer error: ${err?.message || err}`));
+    }
+
+    bootAsHost();
+
+    // --- detection loop (local emit + send over data channel)
+    function loop() {
+      const ts = performance.now();
+
+      // hand 👍
+      const handResult = gestureRecognizer.recognizeForVideo(localVideo, ts);
+      const handGest = handResult?.gestures?.[0]?.[0];
+      if (handGest?.categoryName === "Thumb_Up" && handGest.score > 0.6) {
+        emit(localLayer, "👍"); sendEmoji("👍");
+      }
+
+      // face: laugh / wow
+      const faceResult = faceLandmarker.detectForVideo(localVideo, ts);
+      if (faceResult?.faceLandmarks?.length) {
+        const s = mouthState(faceResult.faceLandmarks);
+        if (s === "laugh") { emit(localLayer, "😂"); sendEmoji("😂"); }
+        else if (s === "wow") { emit(localLayer, "😮"); sendEmoji("😮"); }
+      }
+
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // Basic connectivity hint for localhost HTTPS requirement on some browsers
+    if (location.protocol !== "https:" && location.hostname !== "localhost") {
+      setStatus("Tip: Use HTTPS or localhost for camera.");
+    }
+  </script>
+</body>
+</html>
