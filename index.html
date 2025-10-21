@@ -70,7 +70,7 @@
   <script type="module">
     import { FilesetResolver, FaceLandmarker, GestureRecognizer }
       from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
-    import "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"; // API ref: peerjs.com/docs :contentReference[oaicite:0]{index=0}
+    import "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
 
     // DOM
     const localVideo = document.getElementById("localVideo");
@@ -81,7 +81,6 @@
     const roomInput = document.getElementById("roomInput");
     const startBtn = document.getElementById("startBtn");
     const suggestBtn = document.getElementById("suggestBtn");
-
     remoteVideo.muted = true; // satisfy autoplay
 
     // UI helpers
@@ -122,41 +121,21 @@
       return "neutral";
     }
 
-    // Camera
-    const localStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user" },
-      audio: false // change to true if you need audio
-    });
-    localVideo.srcObject = localStream; await localVideo.play();
+    // Camera/mic like the simple app (audio true so it behaves the same)
+    let localStream=null;
+    try{
+      localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+      localVideo.srcObject = localStream; await localVideo.play();
+      setStatus("Camera ready");
+    }catch(e){
+      setStatus(`Camera error: ${e?.name||e}`); throw e;
+    }
 
-    // PeerJS config
-    const peerOpts = {
-      host: "0.peerjs.com", port: 443, secure: true, path: "/", debug: 2, // cloud defaults :contentReference[oaicite:1]{index=1}
-      config: {
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "turn:openrelay.metered.ca:80" },
-          { urls: "turn:openrelay.metered.ca:443" },
-          { urls: "turn:openrelay.metered.ca:3478" }
-        ],
-        sdpSemantics: "unified-plan",
-        iceTransportPolicy: "all"
-      }
-    };
+    // PeerJS: use defaults like the working simple app
+    const peerOpts = { debug: 2 }; // no custom TURN/STUN
 
     // State
-    let peer=null, isHost=false, dataConn=null, call=null, remoteStreamArrived=false, pc=null;
-
-    function wireRTCDebug(peerConn){
-      try {
-        pc = peerConn._pc || peerConn._negotiator?._pc || null;
-        if(!pc) return;
-        pc.addEventListener("iceconnectionstatechange", ()=>setStatus(`ICE: ${pc.iceConnectionState}`));
-        pc.addEventListener("connectionstatechange", ()=>setStatus(`PC: ${pc.connectionState}`));
-        pc.addEventListener("signalingstatechange", ()=>console.log("signaling:", pc.signalingState));
-        pc.addEventListener("icecandidateerror", e=>console.warn("icecandidateerror", e));
-      } catch {}
-    }
+    let peer=null, isHost=false, dataConn=null, call=null;
 
     function setupData(conn){
       dataConn = conn;
@@ -165,39 +144,36 @@
       conn.on("close", ()=>setStatus("Peer disconnected"));
       conn.on("error", e=>setStatus(`Data error: ${e?.message||e}`));
     }
-
     function sendEmoji(emoji){ if(dataConn?.open) dataConn.send({ type:"emoji", value:emoji }); }
 
+    // Simple-app calling model
     function answerIncoming(incoming){
       call = incoming;
-      wireRTCDebug(call);
-      call.on("stream", s=>{ remoteStreamArrived=true; remoteVideo.srcObject=s; remoteVideo.play().catch(()=>{}); setStatus(`Connected to ${call.peer}`); });
+      call.on("stream", s=>{ remoteVideo.srcObject=s; remoteVideo.play().catch(()=>{}); setStatus(`Connected to ${call.peer}`); });
       call.on("close", ()=>setStatus("Call closed"));
       call.on("error", e=>setStatus(`Call error: ${e?.message||e}`));
       call.answer(localStream);
     }
-
     function placeCall(targetId){
       if(call) try{ call.close(); }catch{}
       call = peer.call(targetId, localStream);
-      wireRTCDebug(call);
-      call.on("stream", s=>{ remoteStreamArrived=true; remoteVideo.srcObject=s; remoteVideo.play().catch(()=>{}); setStatus(`Connected to ${call.peer}`); });
+      call.on("stream", s=>{ remoteVideo.srcObject=s; remoteVideo.play().catch(()=>{}); setStatus(`Connected to ${call.peer}`); });
       call.on("close", ()=>setStatus("Call closed"));
       call.on("error", e=>setStatus(`Call error: ${e?.message||e}`));
-      // timeout + retry once
-      setTimeout(()=>{ if(!remoteStreamArrived && call?.open){ setStatus("No remote stream yet. Retrying media call"); try{call.close();}catch{}; placeCall(targetId); } }, 6000);
     }
 
     function startAsHost(roomId){
       isHost = true;
       peer = new window.Peer(roomId, peerOpts);
-      peer.on("open", id=>setStatus(`Hosting "${id}" — waiting for peer…`));
-      peer.on("connection", c=>{ setupData(c); /* host triggers media call only after data opens */ c.on("open", ()=>placeCall(c.peer)); });
-      peer.on("call", answerIncoming); // accept if client tries first
+      peer.on("open", id=>setStatus(`Hosting "${id}" — waiting for caller…`));
+      peer.on("connection", setupData);         // accept data channel
+      peer.on("call", answerIncoming);          // answer media like simple app
       peer.on("error", err=>{
         const m=err?.message||"";
-        if(err?.type==="unavailable-id" || /taken/i.test(m)){ setStatus(`"${roomId}" taken. Switching to client`); destroyPeer(); startAsClient(roomId); }
-        else setStatus(`Peer error: ${m}`);
+        if(err?.type==="unavailable-id" || /taken/i.test(m)){
+          setStatus(`"${roomId}" taken. Switching to client`);
+          destroyPeer(); startAsClient(roomId);
+        } else setStatus(`Peer error: ${m}`);
       });
       peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
       peer.on("close", ()=>setStatus("Peer destroyed"));
@@ -208,11 +184,12 @@
       peer = new window.Peer(undefined, peerOpts);
       peer.on("open", id=>{
         setStatus(`Joining "${roomId}" as ${id}`);
-        const c = peer.connect(roomId, { reliable:true });
-        setupData(c);
-        c.on("open", ()=>{ /* client does NOT call. host will call after data opens */ setStatus("Data open. Waiting for host media call…"); });
+        // open data channel for emojis
+        const c = peer.connect(roomId, { reliable:true }); setupData(c);
+        // immediately place the media call like the simple app
+        placeCall(roomId);
       });
-      peer.on("call", answerIncoming);
+      peer.on("call", answerIncoming); // also answer if host calls first
       peer.on("error", e=>setStatus(`Peer error: ${e?.message||e}`));
       peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
       peer.on("close", ()=>setStatus("Peer destroyed"));
@@ -223,7 +200,7 @@
       try{ dataConn?.close(); }catch{}
       try{ peer?.disconnect(); }catch{}
       try{ peer?.destroy(); }catch{}
-      call=null; dataConn=null; peer=null; pc=null; remoteStreamArrived=false;
+      call=null; dataConn=null; peer=null;
     }
 
     // UI
@@ -236,7 +213,7 @@
       localStorage.setItem("roomWord", roomWord);
       destroyPeer();
       setStatus(`Starting with room "${roomWord}"…`);
-      // Try host first. If taken, become client.
+      // Try host first. If taken, become client. Then follow simple call flow.
       startAsHost(roomWord);
     });
     roomInput.addEventListener("keydown", e=>{ if(e.key==="Enter") startBtn.click(); });
