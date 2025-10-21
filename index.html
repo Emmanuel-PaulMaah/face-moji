@@ -15,17 +15,18 @@
     .status { position:fixed; left:12px; bottom:12px; opacity:.8; font-size:13px; }
     .controls {
       position:fixed; top:10px; left:12px; right:12px;
-      display:flex; gap:8px; align-items:center; z-index:2;
+      display:flex; flex-direction:column; gap:8px; align-items:stretch; z-index:2;
       background:#121214; border:1px solid #202026; border-radius:10px; padding:10px;
     }
     .controls input {
-      flex:1; background:#0a0a0b; color:#ddd; border:1px solid #2a2a2f;
+      background:#0a0a0b; color:#ddd; border:1px solid #2a2a2f;
       padding:10px 12px; border-radius:8px; outline:none; font-size:14px;
     }
     .controls button {
       background:#2b6ef6; color:white; border:0; padding:10px 14px; border-radius:8px; font-weight:600; cursor:pointer;
     }
-    .controls button.secondary { background:#2a2a2f; }
+    .controls button.secondary { background:#2a2a2f; width:auto; align-self:flex-end; }
+    .controls #startBtn { width:100%; } /* make Start full width */
     .bubble {
       position:absolute; left:50%; bottom:8%;
       font-size:min(14vw,72px);
@@ -49,7 +50,7 @@
   <div class="controls">
     <strong>Room</strong>
     <input id="roomInput" placeholder="e.g. comet-river" autocomplete="off" />
-    <button id="suggestBtn" class="secondary">Suggest</button> <br />
+    <button id="suggestBtn" class="secondary">Suggest</button>
     <button id="startBtn">Start</button>
   </div>
 
@@ -72,7 +73,6 @@
       from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
     import "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
 
-    // DOM
     const localVideo = document.getElementById("localVideo");
     const remoteVideo = document.getElementById("remoteVideo");
     const localLayer = document.getElementById("localLayer");
@@ -81,15 +81,13 @@
     const roomInput = document.getElementById("roomInput");
     const startBtn = document.getElementById("startBtn");
     const suggestBtn = document.getElementById("suggestBtn");
-    remoteVideo.muted = true; // satisfy autoplay
+    remoteVideo.muted = true;
 
-    // UI helpers
     const ADJ = ["solar","lunar","comet","crisp","neon","azure","gamma","swift","quiet","vivid","mellow","ember","nova"];
     const NOUN = ["river","meadow","orbit","oasis","harbor","valley","summit","island","canyon","circuit","galaxy","vector","garden","studio"];
     function suggestWord(){ return `${ADJ[Math.floor(Math.random()*ADJ.length)]}-${NOUN[Math.floor(Math.random()*NOUN.length)]}`; }
     function setStatus(s){ statusEl.textContent = s; console.log("[status]", s); }
 
-    // Emoji particles
     const MAX_PARTICLES = 140, MIN_GAP_MS = 140, lastEmit = new Map();
     function emit(layer, emoji, key=emoji){
       const now = performance.now(), last = lastEmit.get(key)||0;
@@ -102,7 +100,6 @@
       if(layer.childElementCount>MAX_PARTICLES){ for(let i=0;i<layer.childElementCount-MAX_PARTICLES;i++) layer.firstElementChild?.remove(); }
     }
 
-    // MediaPipe
     const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
     const faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
       baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" },
@@ -121,7 +118,6 @@
       return "neutral";
     }
 
-    // Camera/mic like the simple app (audio true so it behaves the same)
     let localStream=null;
     try{
       localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
@@ -131,10 +127,8 @@
       setStatus(`Camera error: ${e?.name||e}`); throw e;
     }
 
-    // PeerJS: use defaults like the working simple app
-    const peerOpts = { debug: 2 }; // no custom TURN/STUN
+    const peerOpts = { debug: 2 };
 
-    // State
     let peer=null, isHost=false, dataConn=null, call=null;
 
     function setupData(conn){
@@ -146,7 +140,6 @@
     }
     function sendEmoji(emoji){ if(dataConn?.open) dataConn.send({ type:"emoji", value:emoji }); }
 
-    // Simple-app calling model
     function answerIncoming(incoming){
       call = incoming;
       call.on("stream", s=>{ remoteVideo.srcObject=s; remoteVideo.play().catch(()=>{}); setStatus(`Connected to ${call.peer}`); });
@@ -166,8 +159,8 @@
       isHost = true;
       peer = new window.Peer(roomId, peerOpts);
       peer.on("open", id=>setStatus(`Hosting "${id}" — waiting for caller…`));
-      peer.on("connection", setupData);         // accept data channel
-      peer.on("call", answerIncoming);          // answer media like simple app
+      peer.on("connection", setupData);
+      peer.on("call", answerIncoming);
       peer.on("error", err=>{
         const m=err?.message||"";
         if(err?.type==="unavailable-id" || /taken/i.test(m)){
@@ -184,12 +177,10 @@
       peer = new window.Peer(undefined, peerOpts);
       peer.on("open", id=>{
         setStatus(`Joining "${roomId}" as ${id}`);
-        // open data channel for emojis
         const c = peer.connect(roomId, { reliable:true }); setupData(c);
-        // immediately place the media call like the simple app
         placeCall(roomId);
       });
-      peer.on("call", answerIncoming); // also answer if host calls first
+      peer.on("call", answerIncoming);
       peer.on("error", e=>setStatus(`Peer error: ${e?.message||e}`));
       peer.on("disconnected", ()=>setStatus("Signaling disconnected"));
       peer.on("close", ()=>setStatus("Peer destroyed"));
@@ -203,7 +194,6 @@
       call=null; dataConn=null; peer=null;
     }
 
-    // UI
     function primeInput(){ const saved=localStorage.getItem("roomWord"); roomInput.value = saved || suggestWord(); }
     primeInput();
     suggestBtn.addEventListener("click", ()=>{ roomInput.value=suggestWord(); roomInput.focus(); roomInput.select(); });
@@ -213,12 +203,10 @@
       localStorage.setItem("roomWord", roomWord);
       destroyPeer();
       setStatus(`Starting with room "${roomWord}"…`);
-      // Try host first. If taken, become client. Then follow simple call flow.
       startAsHost(roomWord);
     });
     roomInput.addEventListener("keydown", e=>{ if(e.key==="Enter") startBtn.click(); });
 
-    // Detection loop
     function loop(){
       const ts = performance.now();
       const h = gestureRecognizer.recognizeForVideo(localVideo, ts)?.gestures?.[0]?.[0];
